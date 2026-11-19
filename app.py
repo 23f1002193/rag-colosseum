@@ -3,6 +3,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from rag import answer
+import time, collections
+LOGQ = collections.deque(maxlen=200)
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -28,4 +30,10 @@ async def query(req: Request):
     try: r = answer(q, k)
     except Exception as e:
         print("error", repr(e)); r = {"answer": None, "sources": [], "scores": [], "confidence": 0.0}
+    LOGQ.append({"t": round(time.time(), 2), "q": q, "top_k": k, "r": r})
     return JSONResponse(r)
+
+@app.get("/debug/log")
+def dbg(key: str = ""):
+    if key != "rekha2193secret": return JSONResponse({"error": "not found"}, 404)
+    return list(LOGQ)
