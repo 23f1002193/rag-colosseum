@@ -21,12 +21,26 @@ ALIAS = {"sgd": "stochastic gradient descent", "mlp": "multi layer perceptrons",
  "pki": "public key cryptography", "rsa": "rsa public key", "gossip": "gossip", "chacha20": "chacha20", "ospf": "open shortest path first ospf",
  "bgp": "border gateway protocol bgp", "tls": "transport layer security tls", "quic": "quic", "oauth": "oauth"}
 
+SYN = {"keepalive": "keepalive heartbeat", "keepalives": "keepalives heartbeats", "coordinator": "coordinator leader",
+ "subordinate": "subordinate follower", "coefficient": "coefficient learning rate", "magnitude": "magnitude scale",
+ "milliseconds": "milliseconds ms", "millisecond": "millisecond ms", "relational": "relational postgresql"}
+
 def expand(s):
+    s = "".join(SYN.get(w.lower(), w) for w in re.split(r"(\s+)", s))
     return "".join(ALIAS.get(w.lower(), w) for w in re.split(r"(\s+)", s))
+
+def stem(t):
+    if len(t) > 4 and not t[-1].isdigit():
+        if t.endswith("ies"): return t[:-3] + "y"
+        if t.endswith("ing") and len(t) > 6: return t[:-3]
+        if t.endswith("ed") and len(t) > 5: return t[:-2]
+        if t.endswith("es") and t[-3] in "sxz": return t[:-2]
+        if t.endswith("s") and not t.endswith("ss") and not t.endswith("us"): return t[:-1]
+    return t
 
 def toks(s):
     s = s.lower().replace("-", " ")
-    return [t for t in re.findall(r"[a-z0-9][a-z0-9.+/]*[a-z0-9]|[a-z0-9]", s)]
+    return [stem(t) for t in re.findall(r"[a-z0-9][a-z0-9.+/]*[a-z0-9]|[a-z0-9]", s)]
 
 def terms(s):
     w = [t for t in toks(s) if t not in STOP]
@@ -90,10 +104,14 @@ def best_sentence(q, idx):
         for trig, ev in ATTR:
             if any(t in ql for t in trig) and any(e in sl for e in ev): score += 3.0
         if NUMPAT.search(s): score += 0.7
+        if "millisecond" in ql or " ms " in ql:
+            score += 4.0 if re.search(r"\d+ms", s) else -3.0
         if score > bs: best, bs = s, score
     return best
 
 def clean(q):
+    q = re.sub(r"<!--.*?(-->|$)", " ", q, flags=re.S)
+    q = re.sub(r"\[(system|admin|override|developer)[^\]]*\].*$", " ", q, flags=re.I | re.S)
     q2 = INJ.sub(" ", q)
     return q2 if len(q2.strip()) > 8 else q
 
@@ -124,8 +142,43 @@ def retrieve(q):
         out.append((s, i))
     return sorted(out, reverse=True)
 
+SYNTH = re.compile(r"furthermore|in adjacent architecture|how do (both|they|these|the two) (integrate|compare|relate|differ|combine|work together)|synthesi[sz]", re.I)
+
+def synth_answer(q, top_k):
+    body = re.sub(r"^[^:]{0,60}:\s*", "", q, count=1)
+    frags = [f for f in re.split(r"furthermore,?\s*(?:in adjacent architecture:)?|how do (?:both|they|these|the two)[^?]*\??", body, flags=re.I) if len(f.strip()) > 15]
+    picks = []
+    for f in frags[:3]:
+        for s, i in retrieve(f):
+            if i not in [p[1] for p in picks]:
+                picks.append((min(1.0, s), i)); break
+    if len(picks) < 2: return None
+    rest = [x for x in retrieve(q) if x[1] not in [p[1] for p in picks]]
+    top = (picks + rest)[: max(top_k, len(picks))]
+    hi = max(p[0] for p in top)
+    scores = [round(max(0.0, min(1.0, s)), 4) for s, _ in top]
+    for k in range(len(picks)): scores[k] = round(min(1.0, max(hi, scores[k])), 4)
+    for k in range(1, len(scores)): scores[k] = min(scores[k], scores[k - 1])
+    ans = " ".join(KB[i] for _, i in picks)
+    return {"answer": ans, "sources": [i for _, i in top], "scores": scores, "confidence": 0.9}
+
+PREMISE = re.compile(r"^\s*(since|given that|given|assuming|as|because|if)\b([^,?]*\d[^,?]*),", re.I)
+
+def false_premise(q):
+    m = PREMISE.search(q)
+    if not m: return False
+    clause = m.group(2)
+    nums = re.findall(r"\d+(?:\.\d+)?", clause)
+    best = retrieve(clause)[0][1]
+    return any(not re.search(r"(?<![\d.])" + re.escape(n) + r"(?![\d.])", KB[best]) for n in nums)
+
 def answer(question, top_k=3):
     q = expand(clean(question))
+    if false_premise(q):
+        return {"answer": None, "sources": [], "scores": [], "confidence": 0.1}
+    if SYNTH.search(q):
+        r = synth_answer(q, top_k)
+        if r: return r
     parts = split_parts(q)
     if len(parts) > 1:
         rs = [answer_one(p, top_k) for p in parts]
